@@ -18,6 +18,8 @@
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/transaction/transaction.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
+#include "duckdb/main/context.hpp"
 #include "storage/ducklake_catalog_set.hpp"
 #include "storage/ducklake_inlined_data.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
@@ -188,8 +190,12 @@ class DuckLakeTransaction : public Transaction, public enable_shared_from_this<D
 	friend class DuckLakeInitializer;
 
 public:
-	DuckLakeTransaction(DuckLakeCatalog &ducklake_catalog, TransactionManager &manager, ClientContext &context);
+	DuckLakeTransaction(DuckLakeCatalog &ducklake_catalog, TransactionManager &manager, Context &context,
+	                    MetaTransaction &meta_transaction);
 	~DuckLakeTransaction() override;
+
+	//! The client context that started the transaction (if any)
+	weak_ptr<ClientContext> context;
 
 public:
 	virtual void Start();

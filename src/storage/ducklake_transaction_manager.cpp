@@ -9,11 +9,11 @@ DuckLakeTransactionManager::DuckLakeTransactionManager(AttachedDatabase &db_p, D
     : TransactionManager(db_p), ducklake_catalog(ducklake_catalog) {
 }
 
-Transaction &DuckLakeTransactionManager::StartTransaction(ClientContext &context) {
-	auto transaction = make_shared_ptr<DuckLakeTransaction>(ducklake_catalog, *this, context);
+Transaction &DuckLakeTransactionManager::StartTransaction(Context &context, MetaTransaction &meta_transaction) {
+	auto transaction = make_shared_ptr<DuckLakeTransaction>(ducklake_catalog, *this, context, meta_transaction);
 	transaction->Start();
 	if (Settings::Get<ImmediateTransactionModeSetting>(context) && get_snapshot && ducklake_catalog.IsInitialized() &&
-	    !context.registered_state->Get<DuckLakeInternalConnectionState>(DuckLakeInternalConnectionState::KEY)) {
+	    !context.GetRegisteredState().Get<DuckLakeInternalConnectionState>(DuckLakeInternalConnectionState::KEY)) {
 		get_snapshot = false;
 		// no snapshot loaded yet for this transaction - load it
 		transaction->GetSnapshot();
@@ -59,7 +59,7 @@ void DuckLakeTransactionManager::GetWrittenFiles(vector<string> &result) {
 	}
 }
 
-void DuckLakeTransactionManager::RollbackTransaction(Transaction &transaction) {
+void DuckLakeTransactionManager::RollbackTransaction(ClientContext &, Transaction &transaction) {
 	auto &ducklake_transaction = transaction.Cast<DuckLakeTransaction>();
 	try {
 		ducklake_transaction.Rollback();

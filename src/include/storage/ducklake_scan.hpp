@@ -34,7 +34,7 @@ public:
 };
 
 //! Serialize/Deserialize callbacks for DuckLakeScan (used by table macro Copy)
-void DuckLakeScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
+void DuckLakeScanSerialize(Serializer &serializer, const optional_ptr<const FunctionData> bind_data,
                            const BoundTableFunction &function);
 unique_ptr<FunctionData> DuckLakeScanDeserialize(Deserializer &deserializer, BoundTableFunction &function);
 

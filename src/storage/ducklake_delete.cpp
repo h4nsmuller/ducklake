@@ -67,7 +67,8 @@ static DuckLakeDeleteFile WriteDeleteFileInternal(ClientContext &context, InputT
 
 	DuckLakeUtil::EnsureDirectoryExists(input.fs, input.data_path);
 
-	auto function_data = copy_fun.function.copy_to_bind(input.context, bind_input, names_to_write, types_to_write);
+	cow_ptr<FunctionData> function_data =
+	    copy_fun.function.copy_to_bind(input.context, bind_input, names_to_write, types_to_write);
 	// the delete file columns never hold NULL, so they are written as required
 	vector<BaseStatistics> not_null_stats;
 	vector<optional_ptr<BaseStatistics>> column_stats;
@@ -78,7 +79,7 @@ static DuckLakeDeleteFile WriteDeleteFileInternal(ClientContext &context, InputT
 	for (auto &stats : not_null_stats) {
 		column_stats.push_back(&stats);
 	}
-	CopyToPropagateStatsInput stats_input {input.context, *function_data, column_stats};
+	CopyToPropagateStatsInput stats_input {input.context, function_data, column_stats};
 	copy_fun.function.copy_to_propagate_statistics(stats_input);
 	auto copy_global_state = copy_fun.function.copy_to_initialize_global(context, *function_data, delete_file_path);
 

@@ -171,7 +171,7 @@ void DuckLakeInitializer::LoadExistingDuckLakeWithRetries(DuckLakeTransaction &t
 		}
 		auto wait_ms = retry_config.WaitMs(attempt, MAX_WAIT_MS - waited_ms);
 #ifndef DUCKDB_NO_THREADS
-		ThreadUtil::SleepMs(wait_ms, context);
+		ThreadUtil::SleepMs(wait_ms, context.GetContext());
 #endif
 		waited_ms += wait_ms;
 		RestartMetadataTransaction(transaction);

@@ -853,14 +853,18 @@ LocalTableChangeIterationHelper LocalTableChanges::Changes() const {
 }
 
 DuckLakeTransaction::DuckLakeTransaction(DuckLakeCatalog &ducklake_catalog, TransactionManager &manager,
-                                         ClientContext &context)
-    : Transaction(manager, context), ducklake_catalog(ducklake_catalog), db(*context.db),
+                                         Context &context_p, MetaTransaction &meta_transaction)
+    : Transaction(manager, context_p), ducklake_catalog(ducklake_catalog), db(context_p.GetDatabase()),
       local_catalog_id(DuckLakeConstants::TRANSACTION_LOCAL_ID_START), catalog_version(0) {
 	metadata_manager = DuckLakeMetadataManager::Create(*this);
 	schema_pins = make_uniq<DuckLakeSchemaPinState>();
 	state = make_uniq<DuckLakeTransactionState>(db, ducklake_catalog.IsCommitInfoRequired(), new_name_maps,
 	                                            ducklake_catalog.DataPath(), ducklake_catalog.Separator());
-	start_time = timestamp_tz_t(MetaTransaction::Get(context).start_timestamp);
+	start_time = timestamp_tz_t(meta_transaction.start_timestamp);
+	auto client_context = context_p.TryGetClientContext();
+	if (client_context) {
+		context = client_context->shared_from_this();
+	}
 }
 
 DuckLakeTransaction::~DuckLakeTransaction() {
@@ -986,7 +990,7 @@ Connection &DuckLakeTransaction::GetConnection() {
 	lock_guard<mutex> lock(connection_lock);
 	if (!connection) {
 		connection = make_uniq<Connection>(db);
-		connection->context->registered_state->GetOrCreate<DuckLakeInternalConnectionState>(
+		connection->context->GetContext().GetRegisteredState().GetOrCreate<DuckLakeInternalConnectionState>(
 		    DuckLakeInternalConnectionState::KEY);
 		auto caller_context = context.lock();
 		if (caller_context) {
