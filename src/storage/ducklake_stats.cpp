@@ -8,6 +8,8 @@
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
+#include "duckdb/storage/statistics/bignum_stats.hpp"
+#include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/limits.hpp"
 
@@ -395,25 +397,39 @@ void DuckLakeColumnStats::SetValidity(BaseStatistics &stats) const {
 	}
 }
 
+//! A DECIMAL of more than 38 digits is stored as a BIGNUM, which has statistics of its own
+static bool HasBignumStats(const LogicalType &type) {
+	return type.id() == LogicalTypeId::DECIMAL && Decimal::IsWide(DecimalType::GetWidth(type));
+}
+
 unique_ptr<BaseStatistics> DuckLakeColumnStats::CreateNumericStats() const {
-	if (!has_min && !has_max) {
-		return NumericStats::CreateUnknown(type).ToUnique();
-	}
+	const bool bignum_stats = HasBignumStats(type);
 	// a missing bound leaves its side of the range unknown
-	auto stats = NumericStats::CreateUnknown(type);
+	auto stats = bignum_stats ? BignumStats::CreateUnknown(type) : NumericStats::CreateUnknown(type);
+	if (!has_min && !has_max) {
+		return stats.ToUnique();
+	}
 	if (has_min) {
 		auto min_value = TryCastStatsBound(min, type);
 		if (!min_value) {
 			return nullptr;
 		}
-		NumericStats::SetMin(stats, *min_value);
+		if (bignum_stats) {
+			BignumStats::SetMin(stats, *min_value);
+		} else {
+			NumericStats::SetMin(stats, *min_value);
+		}
 	}
 	if (has_max) {
 		auto max_value = TryCastStatsBound(max, type);
 		if (!max_value) {
 			return nullptr;
 		}
-		NumericStats::SetMax(stats, *max_value);
+		if (bignum_stats) {
+			BignumStats::SetMax(stats, *max_value);
+		} else {
+			NumericStats::SetMax(stats, *max_value);
+		}
 	}
 	SetValidity(stats);
 	return stats.ToUnique();

@@ -1,0 +1,232 @@
+# name: test/sql/wide_decimal/wide_decimal_bucket.test
+# description: The bucket of a DECIMAL does not depend on its width: widening beyond 38 digits keeps every row findable
+# group: [wide_decimal]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/wide_decimal_bucket', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# a DECIMAL of more than 18 digits hashes its text, whatever its width
+query III
+SELECT murmur3_32(v::DECIMAL(38, 2)) = murmur3_32(v::DECIMAL(40, 2)),
+       murmur3_32(v::DECIMAL(19, 2)) = murmur3_32(v::DECIMAL(300, 2)),
+       murmur3_32(v::DECIMAL(39, 2)) = murmur3_32(v::DECIMAL(39, 2)::VARCHAR)
+FROM (VALUES ('1.25'), ('-1.25'), ('0'), ('99999999999999999.99'), ('-12345678901234567.80')) t(v)
+----
+true	true	true
+true	true	true
+true	true	true
+true	true	true
+true	true	true
+
+query I
+SELECT count(DISTINCT murmur3_32(v::DECIMAL(50, 2))) FROM range(1000) t(v)
+----
+1000
+
+# a bucketed table whose key is promoted from 38 to 40 digits
+statement ok
+CREATE TABLE b (c DECIMAL(38, 2), k INTEGER)
+
+statement ok
+ALTER TABLE b SET PARTITIONED BY (bucket(16, c))
+
+statement ok
+INSERT INTO b SELECT i::DECIMAL(38, 2) * 1.25 - 40, i FROM range(64) t(i)
+
+statement ok
+INSERT INTO b VALUES ('999999999999999999999999999999999999.99', 100), ('-999999999999999999999999999999999999.99', 101), (NULL, 102)
+
+statement ok
+SET VARIABLE files_before = (SELECT count(*) FROM ducklake_list_files('ducklake', 'b'))
+
+statement ok
+SET VARIABLE b_id = (SELECT table_id FROM __ducklake_metadata_ducklake.ducklake_table WHERE table_name = 'b')
+
+statement ok
+ALTER TABLE b ALTER c TYPE DECIMAL(40, 2)
+
+# the promotion keeps the buckets, so it does not start a new partition spec
+query I
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_partition_info WHERE table_id = getvariable('b_id')
+----
+1
+
+# every row written before the promotion is found by its key
+query I
+SELECT count(*) FROM range(64) t(i) WHERE (SELECT count(*) FROM b WHERE c = (i::DECIMAL(40, 2) * 1.25 - 40)) = 1
+----
+64
+
+loop i 0 64
+
+# a constant key prunes the files by bucket
+query I
+SELECT k = {i} FROM b WHERE c = ({i}::DECIMAL(40, 2) * 1.25 - 40)
+----
+true
+
+endloop
+
+query I
+SELECT k FROM b WHERE c = '999999999999999999999999999999999999.99'::DECIMAL(40, 2)
+----
+100
+
+query I
+SELECT k FROM b WHERE c = '-999999999999999999999999999999999999.99'::DECIMAL(40, 2)
+----
+101
+
+query I
+SELECT k FROM b WHERE c IS NULL
+----
+102
+
+# and only the file of its bucket is read
+query II
+EXPLAIN ANALYZE SELECT k FROM b WHERE c = 5::DECIMAL(40, 2)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+# rows written after the promotion go to the same buckets, also values that need the new width
+statement ok
+INSERT INTO b SELECT i::DECIMAL(40, 2) * 1.25 - 40, i + 1000 FROM range(64) t(i)
+
+statement ok
+INSERT INTO b VALUES ('99999999999999999999999999999999999999.99', 200), ('-99999999999999999999999999999999999999.99', 201)
+
+query I
+SELECT count(*) FROM range(64) t(i) WHERE (SELECT count(*) FROM b WHERE c = (i::DECIMAL(40, 2) * 1.25 - 40)) = 2
+----
+64
+
+query I
+SELECT k FROM b WHERE c = 5::DECIMAL(40, 2) ORDER BY k
+----
+36
+1036
+
+query I
+SELECT k FROM b WHERE c IN ('99999999999999999999999999999999999999.99'::DECIMAL(40, 2), '-999999999999999999999999999999999999.99'::DECIMAL(40, 2)) ORDER BY k
+----
+101
+200
+
+query II
+EXPLAIN ANALYZE SELECT k FROM b WHERE c = 5::DECIMAL(40, 2)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 2\s.*
+
+# and once more, to a width far beyond
+statement ok
+ALTER TABLE b ALTER c TYPE DECIMAL(300, 2)
+
+statement ok
+INSERT INTO b VALUES (5, 2036), (repeat('9', 298) || '.99', 300)
+
+query I
+SELECT k FROM b WHERE c = 5::DECIMAL(300, 2) ORDER BY k
+----
+36
+1036
+2036
+
+query I
+SELECT k FROM b WHERE c = (repeat('9', 298) || '.99')::DECIMAL(300, 2)
+----
+300
+
+query I
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_partition_info WHERE table_id = getvariable('b_id')
+----
+1
+
+query II
+SELECT count(*), count(c) FROM b
+----
+135	134
+
+# compaction keeps the rows in their buckets
+statement ok
+CALL ducklake_merge_adjacent_files('ducklake', 'b')
+
+query I
+SELECT k FROM b WHERE c = 5::DECIMAL(300, 2) ORDER BY k
+----
+36
+1036
+2036
+
+# the files of the value are those of one bucket
+query I
+SELECT count(DISTINCT regexp_extract(data_file, 'bucket=([0-9]+)', 1))
+FROM ducklake_list_files('ducklake', 'b')
+WHERE data_file IN (SELECT filename FROM b WHERE c = 5::DECIMAL(300, 2))
+----
+1
+
+# widening a DECIMAL of up to 18 digits changes its hash, so that starts a new partition spec and reads the old files
+statement ok
+CREATE TABLE s (c DECIMAL(18, 2), k INTEGER)
+
+statement ok
+ALTER TABLE s SET PARTITIONED BY (bucket(16, c))
+
+statement ok
+INSERT INTO s SELECT i * 1.25, i FROM range(64) t(i)
+
+statement ok
+ALTER TABLE s ALTER c TYPE DECIMAL(50, 2)
+
+statement ok
+INSERT INTO s SELECT i::DECIMAL(50, 2) * 1.25, i + 1000 FROM range(64) t(i)
+
+query I
+SELECT count(*) FROM range(64) t(i) WHERE (SELECT count(*) FROM s WHERE c = (i::DECIMAL(50, 2) * 1.25)) = 2
+----
+64
+
+# a table that is created with a wide key
+statement ok
+CREATE TABLE w (c DECIMAL(50, 10), k INTEGER)
+
+statement ok
+ALTER TABLE w SET PARTITIONED BY (bucket(8, c))
+
+statement ok
+INSERT INTO w SELECT (i::VARCHAR || repeat('0', 29) || (i % 10)::VARCHAR || '.125')::DECIMAL(50, 10), i FROM range(200) t(i)
+
+query I
+SELECT count(*) FROM ducklake_list_files('ducklake', 'w')
+----
+8
+
+loop i 0 200
+
+query I
+SELECT k = {i} FROM w WHERE c = ('{i}' || repeat('0', 29) || ({i} % 10)::VARCHAR || '.125')::DECIMAL(50, 10)
+----
+true
+
+endloop
+
+query II
+EXPLAIN ANALYZE SELECT k FROM w WHERE c = '17000000000000000000000000000007.125'::DECIMAL(50, 10)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+query I
+SELECT k FROM w WHERE c = '17000000000000000000000000000007.125'::DECIMAL(50, 10)
+----
+17

@@ -262,10 +262,12 @@ static LogicalType GetBucketHashType(const LogicalType &type) {
 	case LogicalTypeId::HUGEINT:
 	case LogicalTypeId::UHUGEINT:
 		// hashed as their text like a wider DECIMAL
-		return LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, 0);
+		return LogicalType::DECIMAL(DecimalType::MaxWidth(), 0);
 	case LogicalTypeId::DECIMAL: {
+		// every DECIMAL of more than 18 digits is hashed as its text, also those of more than 38 digits. The widest
+		// DECIMAL stands for all of them, as it has room for any scale.
 		auto width = DecimalType::GetWidth(type) <= Decimal::MAX_WIDTH_INT64 ? Decimal::MAX_WIDTH_INT64
-		                                                                     : Decimal::MAX_WIDTH_DECIMAL;
+		                                                                     : DecimalType::MaxWidth();
 		return LogicalType::DECIMAL(width, DecimalType::GetScale(type));
 	}
 	case LogicalTypeId::FLOAT:

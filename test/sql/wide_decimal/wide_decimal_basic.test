@@ -1,0 +1,145 @@
+# name: test/sql/wide_decimal/wide_decimal_basic.test
+# description: DECIMAL columns of more than 38 digits: create, insert, read, update, delete and compaction
+# group: [wide_decimal]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/wide_decimal_basic', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t (i INTEGER, d50 DECIMAL(50, 2), d300 DECIMAL(300, 10))
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE t) ORDER BY column_name
+----
+d300	DECIMAL(300,10)
+d50	DECIMAL(50,2)
+i	INTEGER
+
+# the type is stored as the specification has it
+query TT
+SELECT column_name, column_type FROM __ducklake_metadata_ducklake.ducklake_column ORDER BY column_id
+----
+i	int32
+d50	decimal(50,2)
+d300	decimal(300,10)
+
+statement ok
+INSERT INTO t VALUES
+	(1, '123456789012345678901234567890123456789012345678.91', repeat('9', 290) || '.' || repeat('9', 10)),
+	(2, '-123456789012345678901234567890123456789012345678.91', '-' || repeat('9', 290) || '.' || repeat('9', 10)),
+	(3, NULL, NULL),
+	(4, 0, 0),
+	(5, -0.01, 0.0000000001)
+
+statement ok
+INSERT INTO t SELECT i, i::DECIMAL(50, 2) * 10000000000 * 10000000000 * 10000000000 * 10000000000, -i FROM range(10, 20) t(i)
+
+query IT
+SELECT i, d50 FROM t WHERE i < 10 ORDER BY i
+----
+1	123456789012345678901234567890123456789012345678.91
+2	-123456789012345678901234567890123456789012345678.91
+3	NULL
+4	0.00
+5	-0.01
+
+query I
+SELECT d300 = (repeat('9', 290) || '.' || repeat('9', 10))::DECIMAL(300, 10) FROM t WHERE i = 1
+----
+true
+
+query TT
+SELECT typeof(d50), typeof(d300) FROM t LIMIT 1
+----
+DECIMAL(50,2)	DECIMAL(300,10)
+
+# aggregates are exact
+query TT
+SELECT sum(d50), max(d50) FROM t WHERE i >= 10
+----
+1450000000000000000000000000000000000000000.00	190000000000000000000000000000000000000000.00
+
+# the Parquet files hold decimals, not doubles or strings
+query TT
+SELECT DISTINCT name, duckdb_type FROM parquet_schema('{DATA_PATH}/wide_decimal_basic/**/*.parquet') WHERE name IN ('d50', 'd300') ORDER BY name
+----
+d300	DECIMAL(300,10)
+d50	DECIMAL(50,2)
+
+# compaction of the two files
+query III
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake')
+----
+t	2	1
+
+query TT
+SELECT sum(d50), min(d300) = ('-' || repeat('9', 290) || '.' || repeat('9', 10))::DECIMAL(300, 10) FROM t WHERE i >= 10 OR i = 2
+----
+-123455339012345678901234567890123456789012345678.91	true
+
+# update and delete
+statement ok
+UPDATE t SET d50 = d50 + 0.01, d300 = d300 * 2 WHERE i >= 10 AND i < 15
+
+statement ok
+DELETE FROM t WHERE d50 < -1
+
+query ITT
+SELECT i, d50, d300 FROM t WHERE i IN (2, 10, 14, 15) ORDER BY i
+----
+10	100000000000000000000000000000000000000000.01	-20.0000000000
+14	140000000000000000000000000000000000000000.01	-28.0000000000
+15	150000000000000000000000000000000000000000.00	-15.0000000000
+
+query II
+SELECT count(*), count(d50) FROM t
+----
+14	13
+
+statement ok
+CREATE TABLE expected AS FROM t
+
+# the rewrite of the files with deleted rows
+statement ok
+CALL ducklake_rewrite_data_files('ducklake', 't', delete_threshold => 0)
+
+query ITT
+(FROM t EXCEPT FROM expected) UNION ALL (FROM expected EXCEPT FROM t)
+----
+
+# time travel reads the rows as they were
+query IT
+SELECT count(*), sum(d50) FROM t AT (VERSION => 3)
+----
+15	1449999999999999999999999999999999999999999.99
+
+# the widest DECIMAL of the session bounds the columns it creates, as in any other catalog
+statement error
+CREATE TABLE too_wide (d DECIMAL(2000000, 2))
+----
+exceeds the maximum DECIMAL width
+
+statement ok
+SET max_decimal_width = 38
+
+statement error
+CREATE TABLE too_wide (d DECIMAL(39, 2))
+----
+exceeds the maximum DECIMAL width of 38
+
+# tables that exist are read regardless
+query IT
+SELECT i, d50 FROM t WHERE i = 1
+----
+1	123456789012345678901234567890123456789012345678.91

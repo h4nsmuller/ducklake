@@ -39,6 +39,8 @@ struct DuckLakeMetadataProfile {
 	//! The type a column of the metadata tables is created with
 	map<LogicalTypeId, string> column_type_overrides;
 	idx_t max_column_count = NumericLimits<idx_t>::Maximum();
+	//! The widest DECIMAL a column of the metadata database can have, wider columns are not inlined
+	idx_t max_decimal_width = NumericLimits<idx_t>::Maximum();
 	vector<string> system_column_names;
 	bool dropped_tables_stay_readable = true;
 	//! Rename the columns of inlined data tables by copying the tables instead of with ALTER TABLE

@@ -146,12 +146,14 @@ LogicalType DuckLakeTypes::FromString(const string &type) {
 		    !TryParseDecimalMember(decimal_members_vect[1], scale)) {
 			throw InvalidInputException("Invalid DECIMAL type \"%s\" - width and scale must be numbers", type);
 		}
-		if (width < 1 || width > Decimal::MAX_WIDTH_DECIMAL || scale > width) {
-			throw InvalidInputException("Invalid DECIMAL type \"%s\" - width must be between 1 and %d and scale must "
-			                            "not exceed the width",
-			                            type, Decimal::MAX_WIDTH_DECIMAL);
+		// the specification has no limit on the width: the bound is the widest DECIMAL the engine has. The
+		// max_decimal_width setting only limits the types a session creates, not the tables it can read.
+		if (width < 1 || width > DecimalType::MaxWidth() || scale > width) {
+			throw InvalidInputException("Invalid DECIMAL type \"%s\" - width must be between 1 and %llu and scale "
+			                            "must not exceed the width",
+			                            type, static_cast<uint64_t>(DecimalType::MaxWidth()));
 		}
-		return LogicalType::DECIMAL(NumericCast<uint8_t>(width), NumericCast<uint8_t>(scale));
+		return LogicalType::DECIMAL(NumericCast<uint32_t>(width), NumericCast<uint32_t>(scale));
 	}
 	return ParseBaseType(type);
 }

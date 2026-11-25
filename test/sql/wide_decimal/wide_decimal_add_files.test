@@ -1,0 +1,139 @@
+# name: test/sql/wide_decimal/wide_decimal_add_files.test
+# description: Parquet files with decimals of more than 38 digits are added as DECIMAL columns of that width
+# group: [wide_decimal]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/wide_decimal_add_files')
+
+statement ok
+COPY (
+	SELECT k::INTEGER AS k, d::DECIMAL(50, 2) AS d FROM (
+		SELECT i AS k, i::VARCHAR || repeat('0', 40) || '.25' AS d FROM range(1, 4) t(i)
+		UNION ALL SELECT 4, '-999999999999999999999999999999999999999999999999.99'
+		UNION ALL SELECT 5, NULL
+	)
+) TO '{DATA_PATH}/wide_decimal_add_files_dec50_2.parquet'
+
+statement ok
+COPY (SELECT 10 AS k, '99999999999999999999999999999999.999999'::DECIMAL(38, 6) AS d) TO '{DATA_PATH}/wide_decimal_add_files_dec38_6.parquet'
+
+statement ok
+COPY (SELECT 20 AS k, (repeat('9', 290) || '.' || repeat('9', 10))::DECIMAL(300, 10) AS d) TO '{DATA_PATH}/wide_decimal_add_files_dec300_10.parquet'
+
+# the file holds a decimal of 50 digits
+query TTII
+SELECT type, converted_type, precision, scale FROM parquet_schema('{DATA_PATH}/wide_decimal_add_files_dec50_2.parquet') WHERE name = 'd'
+----
+FIXED_LEN_BYTE_ARRAY	DECIMAL	50	2
+
+# a table of the type of the file
+statement ok
+CREATE TABLE ducklake.t (k INTEGER, d DECIMAL(50, 2))
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 't', '{DATA_PATH}/wide_decimal_add_files_dec50_2.parquet')
+
+query IT
+FROM ducklake.t ORDER BY k
+----
+1	10000000000000000000000000000000000000000.25
+2	20000000000000000000000000000000000000000.25
+3	30000000000000000000000000000000000000000.25
+4	-999999999999999999999999999999999999999999999999.99
+5	NULL
+
+# the statistics of the file are those of the decimals
+query TT
+SELECT min_value, max_value FROM __ducklake_metadata_ducklake.ducklake_file_column_stats WHERE column_id = 2
+----
+-999999999999999999999999999999999999999999999999.99	30000000000000000000000000000000000000000.25
+
+query I
+SELECT k FROM ducklake.t WHERE d = '20000000000000000000000000000000000000000.25'::DECIMAL(50, 2)
+----
+2
+
+query II
+EXPLAIN ANALYZE SELECT k FROM ducklake.t WHERE d > '30000000000000000000000000000000000000000.25'::DECIMAL(50, 2)
+----
+analyzed_plan	<REGEX>:.*(Total Files Read: 0\s|Empty Result).*
+
+# a file with more digits than the column is rejected
+statement error
+CALL ducklake_add_data_files('ducklake', 't', '{DATA_PATH}/wide_decimal_add_files_dec300_10.parquet')
+----
+Incompatible decimal precision/scale
+
+statement error
+CALL ducklake_add_data_files('ducklake', 't', '{DATA_PATH}/wide_decimal_add_files_dec38_6.parquet')
+----
+Incompatible decimal precision/scale
+
+statement ok
+CREATE TABLE ducklake.narrow (k INTEGER, d DECIMAL(38, 2))
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'narrow', '{DATA_PATH}/wide_decimal_add_files_dec50_2.parquet')
+----
+Incompatible decimal precision/scale
+
+# a column that is not a decimal does not take the file either
+statement ok
+CREATE TABLE ducklake.dbl (k INTEGER, d DOUBLE)
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'dbl', '{DATA_PATH}/wide_decimal_add_files_dec50_2.parquet')
+----
+<REGEX>:.*(DOUBLE|type).*
+
+# a wider table takes the files of narrower decimals
+statement ok
+CREATE TABLE ducklake.w (k INTEGER, d DECIMAL(300, 10))
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'w', '{DATA_PATH}/wide_decimal_add_files_dec50_2.parquet')
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'w', '{DATA_PATH}/wide_decimal_add_files_dec38_6.parquet')
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'w', '{DATA_PATH}/wide_decimal_add_files_dec300_10.parquet')
+
+query IT
+SELECT k, CASE WHEN k = 20 THEN (d = (repeat('9', 290) || '.' || repeat('9', 10))::DECIMAL(300, 10))::VARCHAR ELSE d::VARCHAR END FROM ducklake.w ORDER BY k
+----
+1	10000000000000000000000000000000000000000.2500000000
+2	20000000000000000000000000000000000000000.2500000000
+3	30000000000000000000000000000000000000000.2500000000
+4	-999999999999999999999999999999999999999999999999.9900000000
+5	NULL
+10	99999999999999999999999999999999.9999990000
+20	true
+
+query I
+SELECT k FROM ducklake.w WHERE d = '99999999999999999999999999999999.999999'::DECIMAL(300, 10)
+----
+10
+
+query I
+SELECT k FROM ducklake.w WHERE d > ('1' || repeat('0', 100))::DECIMAL(300, 10)
+----
+20
+
+query II
+EXPLAIN ANALYZE SELECT k FROM ducklake.w WHERE d > ('1' || repeat('0', 100))::DECIMAL(300, 10)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+query I
+SELECT k FROM ducklake.w WHERE d < 0::DECIMAL(300, 10)
+----
+4

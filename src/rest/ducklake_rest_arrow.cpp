@@ -12,8 +12,9 @@ namespace duckdb {
 
 string RESTArrow::Write(ClientContext &context, const vector<string> &names, const ColumnDataCollection &rows) {
 	auto &arrow_types = rows.Types();
-	// types that Arrow does not have are sent as extension types
-	ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, true, ArrowFormatVersion::V1_0, &context);
+	// types that Arrow does not have are sent as extension types. Version 1.1 adds decimal256 to version 1.0, which
+	// DECIMALs of 39 to 76 digits are sent as, and changes nothing for the other types.
+	ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, true, ArrowFormatVersion::V1_1, &context);
 	ArrowSchemaWrapper schema;
 	ArrowConverter::ToArrowSchema(&schema.arrow_schema, arrow_types, names, options);
 	vector<ArrowArrayWrapper> wrappers;

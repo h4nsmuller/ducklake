@@ -15,7 +15,13 @@ static int32_t HashString(string_t value) {
 static void Murmur3ScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &input = args.data[0];
 	auto count = args.size();
-	switch (input.GetType().InternalType()) {
+	auto physical_type = input.GetType().InternalType();
+	if (input.GetType().id() == LogicalTypeId::DECIMAL && physical_type == PhysicalType::VARCHAR) {
+		// a DECIMAL of more than 38 digits is stored as a BIGNUM blob: it hashes its text like the DECIMALs of 19 to
+		// 38 digits do, so that the bucket of a value does not depend on the width of its column
+		physical_type = PhysicalType::INT128;
+	}
+	switch (physical_type) {
 	case PhysicalType::BOOL:
 		UnaryExecutor::Execute<bool, int32_t>(input, result, count, DuckLakeMurmur3::HashValue<int64_t>);
 		break;

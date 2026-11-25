@@ -106,6 +106,10 @@ idx_t DuckLakeMetadataManager::MaxColumnCount() const {
 	return GetMetadataProfile().max_column_count;
 }
 
+idx_t DuckLakeMetadataManager::MaxDecimalWidth() const {
+	return GetMetadataProfile().max_decimal_width;
+}
+
 vector<string> DuckLakeMetadataManager::SystemColumnNames() const {
 	return GetMetadataProfile().system_column_names;
 }
@@ -152,6 +156,10 @@ bool DuckLakeMetadataManager::TypeIsNativelySupported(const LogicalType &type) {
 
 bool DuckLakeMetadataManager::SupportsInlining(const LogicalType &type) {
 	if (type.id() == LogicalTypeId::GEOMETRY) {
+		return false;
+	}
+	if (type.id() == LogicalTypeId::DECIMAL && DecimalType::GetWidth(type) > MaxDecimalWidth()) {
+		// DuckLake has no limit on the width of a DECIMAL, the metadata database may have one
 		return false;
 	}
 	if (type.id() == LogicalTypeId::VARIANT && !TypeIsNativelySupported(type) &&

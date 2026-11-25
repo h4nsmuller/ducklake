@@ -36,6 +36,10 @@ public:
 	idx_t MaxColumnCount() const override {
 		return 1600;
 	}
+	idx_t MaxDecimalWidth() const override {
+		// the largest precision of a NUMERIC with a type modifier
+		return 1000;
+	}
 	vector<string> SystemColumnNames() const override {
 		return {"tableoid", "xmin", "cmin", "xmax", "cmax", "ctid"};
 	}

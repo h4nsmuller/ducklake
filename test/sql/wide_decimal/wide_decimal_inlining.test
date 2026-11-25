@@ -1,0 +1,243 @@
+# name: test/sql/wide_decimal/wide_decimal_inlining.test
+# description: Rows with DECIMAL columns of more than 38 digits are inlined in the metadata database
+# group: [wide_decimal]
+
+require ducklake
+
+require parquet
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/wide_decimal_inlining.db' AS ducklake (DATA_PATH '{DATA_PATH}/wide_decimal_inlining', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t (k INTEGER, d50 DECIMAL(50, 2), d300 DECIMAL(300, 10), s STRUCT(a DECIMAL(40, 1)), l DECIMAL(60, 3)[])
+
+statement ok
+INSERT INTO t VALUES
+	(1, '123456789012345678901234567890123456789012345678.91', repeat('9', 290) || '.' || repeat('9', 10),
+	 {'a': '-999999999999999999999999999999999999999.9'}, ['1.5', NULL, '999999999999999999999999999999999999999999999999999999999.999']),
+	(2, -0.01, '-' || repeat('9', 290) || '.' || repeat('9', 10), NULL, []),
+	(3, NULL, NULL, {'a': NULL}, NULL)
+
+# the rows are in the metadata database, with the types of the table
+query II
+SELECT table_name, file_count FROM ducklake_table_info('ducklake')
+----
+t	0
+
+query TT
+SELECT typeof(d50), typeof(d300) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_1_1 LIMIT 1
+----
+DECIMAL(50,2)	DECIMAL(300,10)
+
+query ITTTT
+SELECT k, d50, d300 = (repeat('9', 290) || '.' || repeat('9', 10))::DECIMAL(300, 10), s, l FROM t ORDER BY k
+----
+1	123456789012345678901234567890123456789012345678.91	true	{'a': -999999999999999999999999999999999999999.9}	[1.500, NULL, 999999999999999999999999999999999999999999999999999999999.999]
+2	-0.01	false	NULL	[]
+3	NULL	NULL	{'a': NULL}	NULL
+
+# filters on inlined rows
+query I
+SELECT k FROM t WHERE d50 > 0::DECIMAL(50, 2)
+----
+1
+
+query I
+SELECT k FROM t WHERE d300 < 0::DECIMAL(300, 10)
+----
+2
+
+# update and delete of inlined rows
+statement ok
+UPDATE t SET d50 = d50 * 2 WHERE k = 1
+
+statement ok
+DELETE FROM t WHERE k = 2
+
+query IT
+SELECT k, d50 FROM t ORDER BY k
+----
+1	246913578024691357802469135780246913578024691357.82
+3	NULL
+
+query IT
+SELECT k, d50 FROM t AT (VERSION => 2) ORDER BY k
+----
+1	123456789012345678901234567890123456789012345678.91
+2	-0.01
+3	NULL
+
+# a promotion of a column with inlined rows
+statement ok
+CREATE TABLE p (k INTEGER, d DECIMAL(38, 2))
+
+statement ok
+INSERT INTO p VALUES (1, '999999999999999999999999999999999999.99'), (2, -1.25)
+
+statement ok
+ALTER TABLE p ALTER d TYPE DECIMAL(50, 4)
+
+statement ok
+INSERT INTO p VALUES (3, '9999999999999999999999999999999999999999999999.9999')
+
+query IT
+SELECT k, d FROM p ORDER BY k
+----
+1	999999999999999999999999999999999999.9900
+2	-1.2500
+3	9999999999999999999999999999999999999999999999.9999
+
+query II
+SELECT table_name, file_count FROM ducklake_table_info('ducklake') ORDER BY table_name
+----
+p	0
+t	0
+
+# flushing writes the rows to Parquet files as decimals
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
+query II
+SELECT table_name, file_count > 0 FROM ducklake_table_info('ducklake') ORDER BY table_name
+----
+p	true
+t	true
+
+query IT
+SELECT k, d FROM p ORDER BY k
+----
+1	999999999999999999999999999999999999.9900
+2	-1.2500
+3	9999999999999999999999999999999999999999999999.9999
+
+query ITTT
+SELECT k, d50, s, l FROM t ORDER BY k
+----
+1	246913578024691357802469135780246913578024691357.82	{'a': -999999999999999999999999999999999999999.9}	[1.500, NULL, 999999999999999999999999999999999999999999999999999999999.999]
+3	NULL	{'a': NULL}	NULL
+
+query I
+SELECT k FROM p WHERE d = '9999999999999999999999999999999999999999999999.9999'::DECIMAL(50, 4)
+----
+3
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+# a metadata database created by a version of DuckDB without these decimals is upgraded when it is attached, like for
+# any other new type
+statement ok
+ATTACH '{TEST_DIR}/wide_decimal_inlining_old.db' AS old_metadata (STORAGE_VERSION 'v1.4.0')
+
+statement ok
+CREATE TABLE old_metadata.unrelated (i INTEGER)
+
+statement ok
+DETACH old_metadata
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/wide_decimal_inlining_old.db' AS ducklake (DATA_PATH '{DATA_PATH}/wide_decimal_inlining_old', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE ducklake.t (k INTEGER, d DECIMAL(50, 2))
+
+statement ok
+INSERT INTO ducklake.t VALUES (1, '123456789012345678901234567890123456789012345678.91')
+
+query II
+SELECT table_name, file_count FROM ducklake_table_info('ducklake')
+----
+t	0
+
+query IT
+FROM ducklake.t
+----
+1	123456789012345678901234567890123456789012345678.91
+
+statement ok
+DETACH ducklake
+
+# a metadata database can have a limit on the width of its decimals: wider columns are written to Parquet files
+statement ok
+CALL ducklake_register_metadata_profile('duckdb', '{"max_decimal_width": 38}')
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/wide_decimal_inlining_limit.db' AS ducklake (DATA_PATH '{DATA_PATH}/wide_decimal_inlining_limit', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE narrow (k INTEGER, d DECIMAL(38, 2))
+
+statement ok
+CREATE TABLE wide (k INTEGER, d DECIMAL(39, 2))
+
+statement ok
+CREATE TABLE nested (k INTEGER, d STRUCT(a DECIMAL(39, 2)[]))
+
+statement ok
+INSERT INTO narrow VALUES (1, 1.5)
+
+statement ok
+INSERT INTO wide VALUES (1, 1.5)
+
+statement ok
+INSERT INTO nested VALUES (1, {'a': [1.5]})
+
+query II
+SELECT table_name, file_count FROM ducklake_table_info('ducklake') ORDER BY table_name
+----
+narrow	0
+nested	1
+wide	1
+
+# a column with inlined rows that is promoted beyond the limit
+statement ok
+ALTER TABLE narrow ALTER d TYPE DECIMAL(40, 2)
+
+statement ok
+INSERT INTO narrow VALUES (2, '99999999999999999999999999999999999999.99')
+
+query IT
+SELECT k, d FROM narrow ORDER BY k
+----
+1	1.50
+2	99999999999999999999999999999999999999.99
+
+query IT
+SELECT k, d FROM narrow AT (VERSION => 4) ORDER BY k
+----
+1	1.50
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
+query IT
+SELECT k, d FROM narrow ORDER BY k
+----
+1	1.50
+2	99999999999999999999999999999999999999.99
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement error
+CALL ducklake_register_metadata_profile('duckdb', '{"max_decimal_width": -1}')
+----
+"max_decimal_width" must be a non-negative integer
+
+statement ok
+CALL ducklake_register_metadata_profile('duckdb', '{}')

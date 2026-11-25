@@ -44,6 +44,8 @@ public:
 				ParseTypes(value);
 			} else if (key == "max_column_count") {
 				profile.max_column_count = GetCount(key, value);
+			} else if (key == "max_decimal_width") {
+				profile.max_decimal_width = GetCount(key, value);
 			} else if (key == "system_column_names") {
 				profile.system_column_names.clear();
 				IterateStrings(key, value, [&](const string &name) { profile.system_column_names.push_back(name); });

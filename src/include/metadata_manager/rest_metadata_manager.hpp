@@ -29,6 +29,10 @@ public:
 		return make_uniq<RESTMetadataManager>(transaction);
 	}
 
+	idx_t MaxDecimalWidth() const override {
+		// inlined rows are sent as Arrow, whose widest decimal is decimal256
+		return 76;
+	}
 	bool IsRemote() const override {
 		return true;
 	}

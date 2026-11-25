@@ -1,0 +1,263 @@
+# name: test/sql/wide_decimal/wide_decimal_promotion.test
+# description: Promotion to a DECIMAL keeps every value: narrower decimals and integers widen, also beyond 38 digits
+# group: [wide_decimal]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/wide_decimal_promotion', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# a DECIMAL is promoted to a DECIMAL with at least its digits before and after the decimal point
+foreach sw,ss,tw,ts 38,2,40,2 38,2,300,10 38,10,48,20 50,2,51,2 50,2,51,3 4,1,9,2 18,0,39,0 40,30,300,290
+
+statement ok
+CREATE TABLE p (c DECIMAL({sw}, {ss}), k INTEGER)
+
+statement ok
+INSERT INTO p VALUES (1, 1), (2, 2), (NULL, 3)
+
+statement ok
+ALTER TABLE p ALTER c TYPE DECIMAL({tw}, {ts})
+
+query I
+SELECT typeof(c) = 'DECIMAL({tw},{ts})' FROM p LIMIT 1
+----
+true
+
+statement ok
+INSERT INTO p VALUES (3, 4)
+
+query II
+SELECT c::INTEGER, k FROM p ORDER BY k
+----
+1	1
+2	2
+NULL	3
+3	4
+
+statement ok
+DROP TABLE p
+
+endloop
+
+# an integer is promoted to a DECIMAL with room for its largest value before the decimal point
+foreach source,tw,ts TINYINT,3,0 INTEGER,50,0 INTEGER,50,40 BIGINT,19,0 BIGINT,44,25 UBIGINT,20,0 HUGEINT,39,0 UHUGEINT,39,0 HUGEINT,300,10
+
+statement ok
+CREATE TABLE p (c {source}, k INTEGER)
+
+statement ok
+INSERT INTO p VALUES (1, 1), (2, 2), (NULL, 3)
+
+statement ok
+ALTER TABLE p ALTER c TYPE DECIMAL({tw}, {ts})
+
+query I
+SELECT typeof(c) = 'DECIMAL({tw},{ts})' FROM p LIMIT 1
+----
+true
+
+statement ok
+INSERT INTO p VALUES (3, 4)
+
+query II
+SELECT c::INTEGER, k FROM p ORDER BY k
+----
+1	1
+2	2
+NULL	3
+3	4
+
+statement ok
+DROP TABLE p
+
+endloop
+
+# promotions that would lose digits before or after the decimal point
+foreach sw,ss,tw,ts 50,2,40,2 50,2,38,2 50,2,50,1 50,2,50,3 38,10,38,20 40,2,38,0 300,10,299,10
+
+statement ok
+CREATE TABLE p (c DECIMAL({sw}, {ss}), k INTEGER)
+
+statement error
+ALTER TABLE p ALTER c TYPE DECIMAL({tw}, {ts})
+----
+only widening type promotions are allowed
+
+statement ok
+DROP TABLE p
+
+endloop
+
+foreach source,tw,ts TINYINT,2,0 INTEGER,9,0 BIGINT,18,0 BIGINT,38,25 BIGINT,43,25 UBIGINT,19,0 HUGEINT,38,0 UHUGEINT,38,0 HUGEINT,300,262 DOUBLE,300,10 VARCHAR,50,2
+
+statement ok
+CREATE TABLE p (c {source}, k INTEGER)
+
+statement error
+ALTER TABLE p ALTER c TYPE DECIMAL({tw}, {ts})
+----
+only widening type promotions are allowed
+
+statement ok
+DROP TABLE p
+
+endloop
+
+# values at the far end of the source types are read at the promoted type. The Parquet files of DuckDB hold a
+# HUGEINT as a DOUBLE, so these are values a DOUBLE has exactly.
+statement ok
+CREATE TABLE h (c HUGEINT, u UHUGEINT, b BIGINT, d DECIMAL(38, 2))
+
+statement ok
+INSERT INTO h VALUES
+	(1267650600228229401496703205376, 1267650600228229401496703205376, 9223372036854775807,
+	 '999999999999999999999999999999999999.99'),
+	(-1267650600228229401496703205376, 0, -9223372036854775808, '-999999999999999999999999999999999999.99')
+
+statement ok
+ALTER TABLE h ALTER c TYPE DECIMAL(39, 0)
+
+statement ok
+ALTER TABLE h ALTER u TYPE DECIMAL(39, 0)
+
+statement ok
+ALTER TABLE h ALTER b TYPE DECIMAL(44, 25)
+
+statement ok
+ALTER TABLE h ALTER d TYPE DECIMAL(40, 3)
+
+query TTTT
+SELECT c, u, b, d FROM h ORDER BY c
+----
+-1267650600228229401496703205376	0	-9223372036854775808.0000000000000000000000000	-999999999999999999999999999999999999.990
+1267650600228229401496703205376	1267650600228229401496703205376	9223372036854775807.0000000000000000000000000	999999999999999999999999999999999999.990
+
+# the files written before and after are found by a filter on the promoted column
+statement ok
+INSERT INTO h VALUES ('999999999999999999999999999999999999999', NULL, NULL, '9999999999999999999999999999999999999.999')
+
+query I
+SELECT count(*) FROM h WHERE c >= 1267650600228229401496703205376::DECIMAL(39, 0)
+----
+2
+
+query T
+SELECT d FROM h WHERE d = '999999999999999999999999999999999999.99'::DECIMAL(40, 3)
+----
+999999999999999999999999999999999999.990
+
+query II
+EXPLAIN ANALYZE SELECT d FROM h WHERE d = '999999999999999999999999999999999999.99'::DECIMAL(40, 3)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+query TT
+SELECT min_value, max_value
+FROM __ducklake_metadata_ducklake.ducklake_table_column_stats
+WHERE table_id = (SELECT table_id FROM __ducklake_metadata_ducklake.ducklake_table WHERE table_name = 'h') AND column_id = 4
+----
+-999999999999999999999999999999999999.99	9999999999999999999999999999999999999.999
+
+# time travel across a promotion: each snapshot has the type and the rows of its time
+statement ok
+CREATE TABLE tt (k INTEGER, d DECIMAL(38, 2))
+
+statement ok
+INSERT INTO tt VALUES (1, 1.25), (2, '-999999999999999999999999999999999999.99')
+
+statement ok
+SET VARIABLE before_promotion = (SELECT max(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+statement ok
+ALTER TABLE tt ALTER d TYPE DECIMAL(50, 2)
+
+statement ok
+INSERT INTO tt VALUES (3, '999999999999999999999999999999999999999999999999.99')
+
+statement ok
+SET VARIABLE after_promotion = (SELECT max(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+statement ok
+ALTER TABLE tt ALTER d TYPE DECIMAL(300, 10)
+
+statement ok
+INSERT INTO tt VALUES (4, repeat('1', 290) || '.0000000001')
+
+statement ok
+UPDATE tt SET d = d + 1 WHERE k = 1
+
+query ITT
+SELECT k, typeof(d), d FROM tt AT (VERSION => getvariable('before_promotion')) ORDER BY k
+----
+1	DECIMAL(38,2)	1.25
+2	DECIMAL(38,2)	-999999999999999999999999999999999999.99
+
+query ITT
+SELECT k, typeof(d), d FROM tt AT (VERSION => getvariable('after_promotion')) ORDER BY k
+----
+1	DECIMAL(50,2)	1.25
+2	DECIMAL(50,2)	-999999999999999999999999999999999999.99
+3	DECIMAL(50,2)	999999999999999999999999999999999999999999999999.99
+
+query ITT
+SELECT k, typeof(d), CASE WHEN k = 4 THEN (d = (repeat('1', 290) || '.0000000001')::DECIMAL(300, 10))::VARCHAR ELSE d::VARCHAR END FROM tt ORDER BY k
+----
+1	DECIMAL(300,10)	2.2500000000
+2	DECIMAL(300,10)	-999999999999999999999999999999999999.9900000000
+3	DECIMAL(300,10)	999999999999999999999999999999999999999999999999.9900000000
+4	DECIMAL(300,10)	true
+
+# compaction rewrites the files of the three types as the current one
+statement ok
+CALL ducklake_rewrite_data_files('ducklake', 'tt', delete_threshold => 0)
+
+statement ok
+CALL ducklake_merge_adjacent_files('ducklake', 'tt')
+
+query II
+SELECT count(*), sum(d) = (repeat('1', 290) || '.0000000001')::DECIMAL(300, 10) + '999999999999999999999999999999999999999999999999.99'::DECIMAL(50, 2) - '999999999999999999999999999999999999.99'::DECIMAL(38, 2) + 2.25 FROM tt
+----
+4	true
+
+query ITT
+SELECT k, typeof(d), d FROM tt AT (VERSION => getvariable('before_promotion')) ORDER BY k
+----
+1	DECIMAL(38,2)	1.25
+2	DECIMAL(38,2)	-999999999999999999999999999999999999.99
+
+# nested columns promote their fields
+statement ok
+CREATE TABLE n (s STRUCT(a DECIMAL(38, 2), b INTEGER), l DECIMAL(18, 2)[])
+
+statement ok
+INSERT INTO n VALUES ({'a': 1.5, 'b': 2}, [1.25, NULL])
+
+statement ok
+ALTER TABLE n ALTER s TYPE STRUCT(a DECIMAL(60, 2), b DECIMAL(50, 0))
+
+statement ok
+ALTER TABLE n ALTER l TYPE DECIMAL(100, 4)[]
+
+statement ok
+INSERT INTO n VALUES ({'a': '9999999999999999999999999999999999999999999999999999999999.99', 'b': 3}, [repeat('9', 96) || '.9999'])
+
+query TT
+SELECT s, typeof(l) FROM n ORDER BY s.b
+----
+{'a': 1.50, 'b': 2}	DECIMAL(100,4)[]
+{'a': 9999999999999999999999999999999999999999999999999999999999.99, 'b': 3}	DECIMAL(100,4)[]
+
+statement error
+ALTER TABLE n ALTER s TYPE STRUCT(a DECIMAL(59, 2), b DECIMAL(50, 0))
+----
+only widening type promotions are allowed

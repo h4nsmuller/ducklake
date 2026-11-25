@@ -324,6 +324,8 @@ public:
 	}
 	//! Maximum number of columns of a table supported by this backend
 	virtual idx_t MaxColumnCount() const;
+	//! The widest DECIMAL a column of an inlined data table can have
+	virtual idx_t MaxDecimalWidth() const;
 	//! Names of the system columns that the tables of this backend have
 	virtual vector<string> SystemColumnNames() const;
 

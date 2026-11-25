@@ -1,0 +1,222 @@
+# name: test/sql/wide_decimal/wide_decimal_stats.test
+# description: Statistics of DECIMAL columns of more than 38 digits order their bounds numerically and prune files
+# group: [wide_decimal]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/wide_decimal_stats.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/wide_decimal_stats', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t (k INTEGER, d DECIMAL(50, 2))
+
+# one file per insert. As strings 9 sorts after 10 and after 2000..., and -5 before -30
+statement ok
+INSERT INTO t VALUES (1, 9), (2, 10), (3, 9.5)
+
+statement ok
+INSERT INTO t VALUES (4, 100), (5, '200000000000000000000000000000000000000000000.25')
+
+statement ok
+INSERT INTO t VALUES (6, -5), (7, -30), (8, '-200000000000000000000000000000000000000000000.25')
+
+statement ok
+INSERT INTO t VALUES (9, NULL), (10, NULL)
+
+statement ok
+INSERT INTO t VALUES (11, '300000000000000000000000000000000000000000000.00'), (12, '300000000000000000000000000000000000000000001.00')
+
+# the bounds of the files are numeric strings
+query ITT
+SELECT data_file_id, min_value, max_value
+FROM __ducklake_metadata_ducklake.ducklake_file_column_stats
+WHERE column_id = 2
+ORDER BY data_file_id
+----
+0	9.00	10.00
+1	100.00	200000000000000000000000000000000000000000000.25
+2	-200000000000000000000000000000000000000000000.25	-5.00
+3	NULL	NULL
+4	300000000000000000000000000000000000000000000.00	300000000000000000000000000000000000000000001.00
+
+# the bounds of the table are merged by value, not by string
+query TTT
+SELECT min_value, max_value, contains_null
+FROM __ducklake_metadata_ducklake.ducklake_table_column_stats
+WHERE column_id = 2
+----
+-200000000000000000000000000000000000000000000.25	300000000000000000000000000000000000000000001.00	true
+
+query TT
+SELECT min(d), max(d) FROM t
+----
+-200000000000000000000000000000000000000000000.25	300000000000000000000000000000000000000000001.00
+
+# equality reads only the file that can hold the value
+query I
+SELECT k FROM t WHERE d = 9.5::DECIMAL(50, 2)
+----
+3
+
+query II
+EXPLAIN ANALYZE SELECT k FROM t WHERE d = 9.5::DECIMAL(50, 2)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+query I
+SELECT k FROM t WHERE d = '200000000000000000000000000000000000000000000.25'::DECIMAL(50, 2)
+----
+5
+
+query II
+EXPLAIN ANALYZE SELECT k FROM t WHERE d = '200000000000000000000000000000000000000000000.25'::DECIMAL(50, 2)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+# values that differ in a digit beyond the precision of a DOUBLE are told apart
+query I
+SELECT k FROM t WHERE d = '300000000000000000000000000000000000000000001.00'::DECIMAL(50, 2)
+----
+12
+
+query I
+SELECT k FROM t WHERE d > '300000000000000000000000000000000000000000000.00'::DECIMAL(50, 2)
+----
+12
+
+# the maximum of the table shows that no row is above it
+query II
+EXPLAIN ANALYZE SELECT k FROM t WHERE d > '300000000000000000000000000000000000000000001.00'::DECIMAL(50, 2)
+----
+analyzed_plan	<REGEX>:.*Empty Result.*
+
+# ranges follow the numeric order: 9 < 10 < 100, and -30 < -5
+query I
+SELECT k FROM t WHERE d < 10::DECIMAL(50, 2) AND d > 0::DECIMAL(50, 2) ORDER BY k
+----
+1
+3
+
+query II
+EXPLAIN ANALYZE SELECT k FROM t WHERE d < 10::DECIMAL(50, 2) AND d > 0::DECIMAL(50, 2)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+query I
+SELECT k FROM t WHERE d >= 10::DECIMAL(50, 2) AND d <= 100::DECIMAL(50, 2) ORDER BY k
+----
+2
+4
+
+query II
+EXPLAIN ANALYZE SELECT k FROM t WHERE d >= 10::DECIMAL(50, 2) AND d <= 100::DECIMAL(50, 2)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 2\s.*
+
+query I
+SELECT k FROM t WHERE d < -5::DECIMAL(50, 2) ORDER BY k
+----
+7
+8
+
+query II
+EXPLAIN ANALYZE SELECT k FROM t WHERE d < -5::DECIMAL(50, 2)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+query I
+SELECT k FROM t WHERE d > 150::DECIMAL(50, 2) ORDER BY k
+----
+5
+11
+12
+
+query II
+EXPLAIN ANALYZE SELECT k FROM t WHERE d > 150::DECIMAL(50, 2)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 2\s.*
+
+# a file without values is not read for a comparison, and is the only one read for NULL
+query II
+EXPLAIN ANALYZE SELECT k FROM t WHERE d IS NULL
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+query I
+SELECT k FROM t WHERE d IS NULL ORDER BY k
+----
+9
+10
+
+query I
+SELECT count(*) FROM t WHERE d IS NOT NULL
+----
+10
+
+# the statistics survive a reload of the catalog
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/wide_decimal_stats', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+query II
+EXPLAIN ANALYZE SELECT k FROM t WHERE d = 9.5::DECIMAL(50, 2)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+# a wider column yet, whose bounds are longer than the statistics of the engine keep exactly
+statement ok
+CREATE TABLE w (k INTEGER, d DECIMAL(300, 10))
+
+statement ok
+INSERT INTO w VALUES (1, repeat('7', 290) || '.0000000001'), (2, repeat('7', 290) || '.0000000002')
+
+statement ok
+INSERT INTO w VALUES (3, repeat('7', 290) || '.0000000003'), (4, 1)
+
+statement ok
+INSERT INTO w VALUES (5, '-' || repeat('7', 290) || '.0000000003')
+
+query I
+SELECT k FROM w WHERE d = (repeat('7', 290) || '.0000000002')::DECIMAL(300, 10)
+----
+2
+
+query I
+SELECT k FROM w WHERE d > (repeat('7', 290) || '.0000000002')::DECIMAL(300, 10)
+----
+3
+
+query I
+SELECT k FROM w WHERE d < 1::DECIMAL(300, 10)
+----
+5
+
+query II
+EXPLAIN ANALYZE SELECT k FROM w WHERE d < 1::DECIMAL(300, 10)
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s.*
+
+query I
+SELECT k FROM w WHERE d >= 1::DECIMAL(300, 10) ORDER BY k
+----
+1
+2
+3
+4

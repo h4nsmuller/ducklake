@@ -202,7 +202,9 @@ LogicalType RESTJson::TypeFromJson(RESTJsonIn json) {
 		return LogicalType::GEOMETRY(json.Str("crs", string()));
 	}
 	if (StringUtil::CIEquals(id, "decimal")) {
-		return LogicalType::DECIMAL(NumericCast<uint8_t>(json.UInt("width")), NumericCast<uint8_t>(json.UInt("scale")));
+		// validated like the type string of a catalog
+		return DuckLakeTypes::FromString(
+		    StringUtil::Format("decimal(%llu,%llu)", json.UInt("width"), json.UInt("scale")));
 	}
 	auto type = DuckLakeTypes::FromString(id);
 	switch (type.id()) {

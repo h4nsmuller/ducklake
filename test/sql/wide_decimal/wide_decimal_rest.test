@@ -1,0 +1,96 @@
+# name: test/sql/wide_decimal/wide_decimal_rest.test
+# description: DECIMAL columns of more than 38 digits through the DuckLake REST API
+# group: [wide_decimal]
+
+require json
+
+include test/template/rest_setup.test_template
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS dl (DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE dl.t(k INTEGER, a DECIMAL(50, 2), b DECIMAL(76, 10))
+
+query I
+SELECT response->>'$.catalog.tables[0].columns[1].column_type' FROM ducklake_rest_request('{rest_server}', 'GET', '/v1/snapshots/latest?include_catalog=true', '')
+----
+decimal(50,2)
+
+# the width of a structured type is not limited to 38 digits, or to a byte
+query I
+SELECT response->>'$.entry_ids[0].id' FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/transactions/commit',
+'{"requests": [{"create_table": {"placeholder_id": -1, "schema_id": 0, "table_name": "u", "columns": [
+  {"column_name": "a", "column_type": {"id": "decimal", "width": 50, "scale": 2}},
+  {"column_name": "b", "column_type": {"id": "decimal", "width": 300, "scale": 10}}]}}]}')
+----
+2
+
+query I
+SELECT column_type FROM (DESCRIBE dl.u) ORDER BY column_name
+----
+DECIMAL(50,2)
+DECIMAL(300,10)
+
+foreach width,scale 0,0 10,11 4294967296,0
+
+query I
+SELECT response->>'$.error.type' FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/transactions/commit',
+'{"requests": [{"create_table": {"placeholder_id": -1, "schema_id": 0, "table_name": "v", "columns": [{"column_name": "a", "column_type": {"id": "decimal", "width": {width}, "scale": {scale}}}]}}]}')
+----
+Invalid Input
+
+endloop
+
+# inlined rows
+statement ok
+INSERT INTO dl.t VALUES
+	(1, '123456789012345678901234567890123456789012345678.91', repeat('9', 66) || '.' || repeat('9', 10)),
+	(2, -0.01, '-' || repeat('9', 66) || '.' || repeat('9', 10)),
+	(3, NULL, NULL)
+
+query ITT
+SELECT k, a, b = (repeat('9', 66) || '.' || repeat('9', 10))::DECIMAL(76, 10) FROM dl.t ORDER BY k
+----
+1	123456789012345678901234567890123456789012345678.91	true
+2	-0.01	false
+3	NULL	NULL
+
+# data files
+statement ok
+INSERT INTO dl.t SELECT i, i::DECIMAL(50, 2) * 10000000000 * 10000000000 * 10000000000 * 10000000000, -i FROM range(10, 40) t(i)
+
+query ITT
+SELECT count(*), sum(a), min(b) = ('-' || repeat('9', 66) || '.' || repeat('9', 10))::DECIMAL(76, 10) FROM dl.t
+----
+33	123464139012345678901234567890123456789012345678.90	true
+
+query I
+SELECT k FROM dl.t WHERE a = '150000000000000000000000000000000000000000'::DECIMAL(50, 2)
+----
+15
+
+statement ok
+CALL ducklake_flush_inlined_data('dl')
+
+query ITT
+SELECT k, a, b = (repeat('9', 66) || '.' || repeat('9', 10))::DECIMAL(76, 10) FROM dl.t WHERE k < 10 ORDER BY k
+----
+1	123456789012345678901234567890123456789012345678.91	true
+2	-0.01	false
+3	NULL	NULL
+
+# rows are sent as Arrow, which has no decimal of more than 76 digits: such a column is not inlined, and reading
+# its table through the API is refused with the reason
+statement ok
+INSERT INTO dl.u VALUES (1.5, 2.5)
+
+statement error
+FROM dl.u
+----
+Arrow decimals support at most 76 digits
+
+statement ok
+DETACH dl
+
+include test/template/rest_teardown.test_template

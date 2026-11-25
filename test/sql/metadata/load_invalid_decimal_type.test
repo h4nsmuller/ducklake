@@ -17,7 +17,7 @@ CREATE TABLE dl.t (d DECIMAL(10, 2))
 statement ok
 DETACH dl
 
-foreach decimal_type decimal(999999,1) decimal(0,0) decimal(39,0) decimal(10,11)
+foreach decimal_type decimal(4294967296,1) decimal(0,0) decimal(10,11) decimal(39,40)
 
 statement ok
 ATTACH '{TEST_DIR}/invalid_decimal.db' AS meta
@@ -34,7 +34,7 @@ ATTACH 'ducklake:{TEST_DIR}/invalid_decimal.db' AS dl
 statement error
 SELECT * FROM dl.t
 ----
-- width must be between 1 and 38 and scale must not exceed the width
+- width must be between 1 and 4294967295 and scale must not exceed the width
 
 statement ok
 DETACH dl
@@ -65,12 +65,15 @@ DETACH dl
 
 endloop
 
-# the maximum width is accepted
+# the specification has no maximum width: widths above 38 digits are accepted, also those above the widest DECIMAL
+# that the session creates
+foreach width,scale 38,38 39,0 300,10 2000000,1
+
 statement ok
 ATTACH '{TEST_DIR}/invalid_decimal.db' AS meta
 
 statement ok
-UPDATE meta.ducklake_column SET column_type = 'decimal(38,38)'
+UPDATE meta.ducklake_column SET column_type = 'decimal({width},{scale})'
 
 statement ok
 DETACH meta
@@ -79,6 +82,19 @@ statement ok
 ATTACH 'ducklake:{TEST_DIR}/invalid_decimal.db' AS dl
 
 query T
+SELECT column_type = 'DECIMAL({width},{scale})' FROM (DESCRIBE dl.t)
+----
+true
+
+statement ok
+DETACH dl
+
+endloop
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/invalid_decimal.db' AS dl
+
+query T
 SELECT column_type FROM (DESCRIBE dl.t)
 ----
-DECIMAL(38,38)
+DECIMAL(2000000,1)

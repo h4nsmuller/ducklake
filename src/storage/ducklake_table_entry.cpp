@@ -991,11 +991,57 @@ static void ExtractDefaultValue(const DuckLakeColumnData &col_data, DuckLakeColu
 	}
 }
 
+//! The number of digits before the decimal point a type has room for, and the number after it
+static bool TryGetDecimalDigits(const LogicalType &type, uint32_t &integer_digits, uint32_t &scale) {
+	scale = 0;
+	switch (type.id()) {
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::UTINYINT:
+		integer_digits = 3;
+		return true;
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::USMALLINT:
+		integer_digits = 5;
+		return true;
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::UINTEGER:
+		integer_digits = 10;
+		return true;
+	case LogicalTypeId::BIGINT:
+		integer_digits = 19;
+		return true;
+	case LogicalTypeId::UBIGINT:
+		integer_digits = 20;
+		return true;
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UHUGEINT:
+		integer_digits = 39;
+		return true;
+	case LogicalTypeId::DECIMAL:
+		scale = DecimalType::GetScale(type);
+		integer_digits = DecimalType::GetWidth(type) - scale;
+		return true;
+	default:
+		return false;
+	}
+}
+
 bool TypePromotionIsAllowed(const LogicalType &source, const LogicalType &target) {
 	if (source == target) {
 		// LCOV_EXCL_START
 		return false;
 		// LCOV_EXCL_STOP
+	}
+	uint32_t source_digits;
+	uint32_t source_scale;
+	if (target.id() == LogicalTypeId::DECIMAL && TryGetDecimalDigits(source, source_digits, source_scale)) {
+		// a DECIMAL is wider when it keeps every value of the source exactly: it has at least the digits before and
+		// after the decimal point of the source. The type combination of DuckDB is not asked: it caps its result at
+		// the widest DECIMAL, which made narrowing to that width pass for a promotion.
+		uint32_t target_digits;
+		uint32_t target_scale;
+		TryGetDecimalDigits(target, target_digits, target_scale);
+		return target_digits >= source_digits && target_scale >= source_scale;
 	}
 	LogicalType result;
 	if (!LogicalType::DefaultTryGetMaxLogicalTypeUnchecked(source, target, result)) {
